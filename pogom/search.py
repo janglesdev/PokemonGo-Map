@@ -596,14 +596,32 @@ def search_worker_thread(args, account_queue, account_failures, search_items_que
                         continue
 
                 # too late?
-                if leaves and now() > (leaves - args.min_seconds_left):
+                extra_delay = check_speed_limit(args, status['location'], step_location, status['last_scan_time'])
+                continue_time = time.time() + extra_delay
+
+                if leaves and continue_time > (leaves - args.min_seconds_left):
                     search_items_queue.task_done()
                     status['skip'] += 1
                     # it is slightly silly to put this in status['message'] since it'll be overwritten very shortly after. Oh well.
-                    status['message'] = 'Too late for location {:6f},{:6f}; skipping'.format(step_location[0], step_location[1])
+                    if time.time() > (leaves - args.min_seconds_left):
+                        status['message'] = 'Too late for location {:6f},{:6f}; skipping'.format(step_location[0], step_location[1])
+                    else:
+                        status['message'] = 'Skipping {:6f},{:6f}; outside time and speed constraints'.format(step_location[0], step_location[1])
                     log.info(status['message'])
                     # No sleep here; we've not done anything worth sleeping for. Plus we clearly need to catch up!
                     continue
+
+                # too fast?
+                if extra_delay:
+                    status['message'] = 'Too fast for {:6f},{:6f}; waiting {}s...'.format(step_location[0], step_location[1], extra_delay)
+                    log.info(status['message'])
+                    continue_time = time.time() + extra_delay
+
+                    while time.time() < continue_time:
+                        time.sleep(1)
+                        remain = int(continue_time - time.time())
+                        if remain:
+                            status['message'] = 'Too fast for {:6f},{:6f}; waiting {}s...'.format(step_location[0], step_location[1], remain)
 
                 # Let the api know where we intend to be for this loop
                 # doing this before check_login so it does not also have to be done there
@@ -828,7 +846,27 @@ def calc_distance(pos1, pos2):
     return d
 
 
-# Delay each thread start time so that logins occur after delay
+def check_speed_limit(args, previous_location, next_location, last_scan_time):
+    if args.speed_limit > 0 and last_scan_time > 0:
+        move_distance = calc_distance(previous_location, next_location)
+        time_elapsed = time.time() - last_scan_time
+
+        if time_elapsed <= 0:
+            time_elapsed = 0.001
+        projected_speed = 3600.0 * move_distance / time_elapsed
+
+        if projected_speed > args.speed_limit:
+            extra_delay = int(move_distance / args.speed_limit * 3600.0 - time_elapsed) + 1
+
+            if args.max_speed_limit_delay and extra_delay > args.max_speed_limit_delay:
+                return args.max_speed_limit_delay
+            else:
+                return extra_delay
+
+    return 0
+
+
+# Delay each thread start time so that logins only occur after delay
 def stagger_thread(args, account):
     if args.accounts.index(account) == 0:
         return  # No need to delay the first one
