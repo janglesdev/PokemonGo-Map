@@ -530,37 +530,6 @@ def search_worker_thread(args, account_queue, account_failures, search_items_que
                     account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'failures'})
                     break  # exit this loop to get a new account and have the API recreated
 
-                if args.captcha_solving:
-
-                    if consecutive_empties >= 2:
-                        captcha_url = captcha_request(api)
-
-                        if len(captcha_url) > 1:
-                            status['message'] = 'Account {} is encountering a captcha, starting 2captcha sequence'.format(account['username'])
-                            log.warning(status['message'])
-                            captcha_token = token_request(args, status, captcha_url)
-
-                            if 'ERROR' in captcha_token:
-                                log.warning("Unable to resolve captcha, please check your 2captcha API key and/or wallet balance")
-                                account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'catpcha failed to verify'})
-                                break
-
-                            else:
-                                status['message'] = 'Retrieved captcha token, attempting to verify challenge for {}'.format(account['username'])
-                                log.info(status['message'])
-                                response = api.verify_challenge(token=captcha_token)
-
-                                if 'success' in response['responses']['VERIFY_CHALLENGE']:
-                                    status['message'] = "Account {} successfully uncaptcha'd".format(account['username'])
-                                    log.info(status['message'])
-
-                                else:
-                                    status['message'] = "Account {} failed verifyChallenge, putting away account for now".format(account['username'])
-                                    log.info(status['message'])
-                                    account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'catpcha failed to verify'})
-                                    break
-                                time.sleep(1)
-
                 while pause_bit.is_set():
                     status['message'] = 'Scanning paused'
                     time.sleep(2)
@@ -596,14 +565,32 @@ def search_worker_thread(args, account_queue, account_failures, search_items_que
                         continue
 
                 # too late?
-                if leaves and now() > (leaves - args.min_seconds_left):
+                extra_delay = check_speed_limit(args, status['location'], step_location, status['last_scan_time'])
+                continue_time = time.time() + extra_delay
+
+                if leaves and continue_time > (leaves - args.min_seconds_left):
                     search_items_queue.task_done()
                     status['skip'] += 1
                     # it is slightly silly to put this in status['message'] since it'll be overwritten very shortly after. Oh well.
-                    status['message'] = 'Too late for location {:6f},{:6f}; skipping'.format(step_location[0], step_location[1])
+                    if time.time() > (leaves - args.min_seconds_left):
+                        status['message'] = 'Too late for location {:6f},{:6f}; skipping'.format(step_location[0], step_location[1])
+                    else:
+                        status['message'] = 'Skipping {:6f},{:6f}; outside time and speed constraints'.format(step_location[0], step_location[1])
                     log.info(status['message'])
                     # No sleep here; we've not done anything worth sleeping for. Plus we clearly need to catch up!
                     continue
+
+                # too fast?
+                if extra_delay:
+                    status['message'] = 'Too fast for {:6f},{:6f}; waiting {}s...'.format(step_location[0], step_location[1], extra_delay)
+                    log.info(status['message'])
+                    continue_time = time.time() + extra_delay
+
+                    while time.time() < continue_time:
+                        time.sleep(1)
+                        remain = int(continue_time - time.time())
+                        if remain:
+                            status['message'] = 'Too fast for {:6f},{:6f}; waiting {}s...'.format(step_location[0], step_location[1], remain)
 
                 # Let the api know where we intend to be for this loop
                 # doing this before check_login so it does not also have to be done there
@@ -614,7 +601,7 @@ def search_worker_thread(args, account_queue, account_failures, search_items_que
                 check_login(args, account, api, step_location, status['proxy_url'])
 
                 # putting this message after the check_login so the messages aren't out of order
-                status['message'] = 'Searching at {:6f},{:6f}'.format(step_location[0], step_location[1])
+                status['message'] = 'Searching at {:6f},{:6f},{:6f}'.format(step_location[0], step_location[1], step_location[2])
                 log.info(status['message'])
 
                 # Make the actual request (finally!)
@@ -629,8 +616,33 @@ def search_worker_thread(args, account_queue, account_failures, search_items_que
                     time.sleep(args.scan_delay)
                     continue
 
-                # Got the response, parse it out, send todo's to db/wh queues
+                # Got the response, check for captcha, parse it out, send todo's to db/wh queues
                 try:
+                    # Captcha check
+                    if args.captcha_solving:
+                        captcha_url = response_dict['responses']['CHECK_CHALLENGE']['challenge_url']
+                        if len(captcha_url) > 1:
+                            status['message'] = 'Account {} is encountering a captcha, starting 2captcha sequence'.format(account['username'])
+                            log.warning(status['message'])
+                            captcha_token = token_request(args, status, captcha_url)
+                            if 'ERROR' in captcha_token:
+                                log.warning("Unable to resolve captcha, please check your 2captcha API key and/or wallet balance")
+                                account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'catpcha failed to verify'})
+                                break
+                            else:
+                                status['message'] = 'Retrieved captcha token, attempting to verify challenge for {}'.format(account['username'])
+                                log.info(status['message'])
+                                response = api.verify_challenge(token=captcha_token)
+                                if 'success' in response['responses']['VERIFY_CHALLENGE']:
+                                    status['message'] = "Account {} successfully uncaptcha'd".format(account['username'])
+                                    log.info(status['message'])
+                                else:
+                                    status['message'] = "Account {} failed verifyChallenge, putting away account for now".format(account['username'])
+                                    log.info(status['message'])
+                                    account_failures.append({'account': account, 'last_fail_time': now(), 'reason': 'catpcha failed to verify'})
+                                    break
+
+                    # Parse 'GET_MAP_OBJECTS'
                     parsed = parse_map(args, response_dict, step_location, dbq, whq, api)
                     search_items_queue.task_done()
                     if parsed['count'] > 0:
@@ -759,10 +771,20 @@ def map_request(api, position, jitter=False):
     try:
         cell_ids = util.get_cell_ids(scan_location[0], scan_location[1])
         timestamps = [0, ] * len(cell_ids)
-        return api.get_map_objects(latitude=f2i(scan_location[0]),
-                                   longitude=f2i(scan_location[1]),
-                                   since_timestamp_ms=timestamps,
-                                   cell_id=cell_ids)
+        req = api.create_request()
+        response = req.check_challenge()
+        response = req.get_hatched_eggs()
+        response = req.get_inventory()
+        response = req.check_awarded_badges()
+        response = req.download_settings()
+        response = req.get_buddy_walked()
+        response = req.get_map_objects(latitude=f2i(scan_location[0]),
+                                       longitude=f2i(scan_location[1]),
+                                       since_timestamp_ms=timestamps,
+                                       cell_id=cell_ids)
+        response = req.call()
+        return response
+
     except Exception as e:
         log.warning('Exception while downloading map: %s', e)
         return False
@@ -783,12 +805,6 @@ def gym_request(api, position, gym):
     except Exception as e:
         log.warning('Exception while downloading gym details: %s', e)
         return False
-
-
-def captcha_request(api):
-    response = api.check_challenge()
-    captcha_url = response['responses']['CHECK_CHALLENGE']['challenge_url']
-    return captcha_url
 
 
 def token_request(args, status, url):
@@ -828,7 +844,27 @@ def calc_distance(pos1, pos2):
     return d
 
 
-# Delay each thread start time so that logins occur after delay
+def check_speed_limit(args, previous_location, next_location, last_scan_time):
+    if args.speed_limit > 0 and last_scan_time > 0:
+        move_distance = calc_distance(previous_location, next_location)
+        time_elapsed = time.time() - last_scan_time
+
+        if time_elapsed <= 0:
+            time_elapsed = 0.001
+        projected_speed = 3600.0 * move_distance / time_elapsed
+
+        if projected_speed > args.speed_limit:
+            extra_delay = int(move_distance / args.speed_limit * 3600.0 - time_elapsed) + 1
+
+            if args.max_speed_limit_delay and extra_delay > args.max_speed_limit_delay:
+                return args.max_speed_limit_delay
+            else:
+                return extra_delay
+
+    return 0
+
+
+# Delay each thread start time so that logins only occur after delay
 def stagger_thread(args, account):
     if args.accounts.index(account) == 0:
         return  # No need to delay the first one

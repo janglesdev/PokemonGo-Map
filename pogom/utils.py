@@ -184,6 +184,8 @@ def get_args():
                         action='store_true', default=False)
     parser.add_argument('--disable-clean', help='Disable clean db loop',
                         action='store_true', default=False)
+    parser.add_argument('-ctd', '--clean-timers-data', help='Set previous spawns as unvalid for new disappear_time prediction',
+                        action='store_true', default=False)
     parser.add_argument('--webhook-updates-only', help='Only send updates (pokémon & lured pokéstops)',
                         action='store_true', default=False)
     parser.add_argument('--wh-threads', help='Number of webhook threads; increase if the webhook queue falls behind',
@@ -196,6 +198,12 @@ def get_args():
                         help='Enable status page database update using STATUS_NAME as main worker name')
     parser.add_argument('-spp', '--status-page-password', default=None,
                         help='Set the status page password')
+    parser.add_argument('-sl', '--speed-limit',
+                        help='If next scan would cause the account to move above specified speed in kmph in a straight line, sleep until such time that it could reasonably move that distance',
+                        type=int, default=0)
+    parser.add_argument('-msld', '--max-speed-limit-delay',
+                        help='Maximum time in seconds to delay when trying to stay under the speed limit',
+                        type=int, default=0)
     parser.add_argument('-el', '--encrypt-lib', help='Path to encrypt lib to be used instead of the shipped ones')
     parser.add_argument('-odt', '--on-demand_timeout', help='Pause searching while web UI is inactive for this timeout(in seconds)', type=int, default=0)
     verbosity = parser.add_mutually_exclusive_group()
@@ -331,6 +339,12 @@ def get_args():
                 errors.append('The number of provided passwords ({}) must match the username count ({})'.format(num_passwords, num_usernames))
             if num_auths > 1 and num_usernames != num_auths:
                 errors.append('The number of provided auth ({}) must match the username count ({})'.format(num_auths, num_usernames))
+
+        if args.speed_limit < 0:
+            errors.append('Speed limit cannot be less than 0')
+
+        if args.max_speed_limit_delay < 0:
+            errors.append('Maximum delay due to speed limit cannot be less than 0')
 
         if len(errors) > 0:
             parser.print_usage()
